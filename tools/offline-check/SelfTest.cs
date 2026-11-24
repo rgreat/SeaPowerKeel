@@ -99,6 +99,7 @@ internal static class SelfTest
             EuromodChecks(tmp);
             LoadScreenEndChecks();
             EarlyStartChecks();
+            StartupDiscoveryChecks(tmp);
             RequiredItemChecks();
             ReportFactsChecks(tmp);
         }
@@ -464,6 +465,7 @@ internal static class SelfTest
         Check(EarlyStart.InInfoIni("[Keel]\nBlockingStart=true\n", EarlyStart.BlockingInfoKey) && !EarlyStart.InInfoIni("[Keel]\nStartEarly=true\n", EarlyStart.BlockingInfoKey)
               && !EarlyStart.InInfoIni("[Keel]\nBlockingStart=true\n"),
               "blocking start: only [Keel] BlockingStart=true counts for it, and it is not a plain StartEarly");
+
         var bA = new PluginEntry { Guid = "a", Name = "A", StartEarly = true, BlockingStart = true };
         var bB = new PluginEntry { Guid = "b", Name = "B", StartEarly = true, BlockingStart = true };
         bB.Dependencies.Add(new Dependency { Guid = "c" });
@@ -472,6 +474,36 @@ internal static class SelfTest
         var plainSet = EarlyStart.Set(new List<PluginEntry> { bA, bB, bC }, null);
         Check(blockSet.SetEquals(new[] { bA }) && plainSet.SetEquals(new[] { bA, bB, bC }),
               "blocking start: A blocks; B needs C, which does not block, so B starts early without holding the game; all three start early");
+    }
+
+    private static void StartupDiscoveryChecks(string tmp)
+    {
+        var folder = new ModFolder { Path = Directory.CreateDirectory(Path.Combine(tmp, "timing")).FullName };
+        var other = new ModFolder { Path = Directory.CreateDirectory(Path.Combine(tmp, "ordinary")).FullName, Enabled = true };
+        string ini = Path.Combine(other.Path, "_info.ini");
+        File.WriteAllText(ini, "[Keel]\nStartEarly=true");
+        File.WriteAllBytes(Path.Combine(other.Path, "native.dll"), new byte[] { 0 });
+        var folders = new[] { other, folder };
+        string dll = Path.Combine(Directory.CreateDirectory(Path.Combine(folder.Path, "plugins")).FullName, "ScreenMod.dll");
+        using var module = Mono.Cecil.ModuleDefinition.CreateModule("ScreenMod", Mono.Cecil.ModuleKind.Dll);
+        var ctor = typeof(AssemblyMetadataAttribute).GetConstructor(new[] { typeof(string), typeof(string) });
+        var attribute = new Mono.Cecil.CustomAttribute(module.ImportReference(ctor));
+        var text = module.TypeSystem.String;
+        attribute.ConstructorArguments.Add(new Mono.Cecil.CustomAttributeArgument(text, EarlyStart.BlockingMetadataKey));
+        attribute.ConstructorArguments.Add(new Mono.Cecil.CustomAttributeArgument(text, "true"));
+        module.Assembly.CustomAttributes.Add(attribute);
+        module.Write(dll);
+
+        Check(EarlyStart.Discover(folders) == StartupTiming.Early, "a disabled DLL cannot override an enabled StartEarly INI");
+        folder.Enabled = true;
+        File.Delete(ini);
+        Check(EarlyStart.Discover(folders) == StartupTiming.Blocking, "a nested DLL-only blocker requests the first-screen hook");
+        attribute.ConstructorArguments[0] = new Mono.Cecil.CustomAttributeArgument(text, EarlyStart.MetadataKey);
+        module.Write(dll);
+        Check(EarlyStart.Discover(folders) == StartupTiming.Early, "an ordinary early DLL does not request the blocking hook");
+        File.WriteAllText(ini, "[Keel]\nBlockingStart=true");
+        Check(EarlyStart.Discover(folders) == StartupTiming.Blocking, "an INI blocker takes priority over an early DLL");
+        Check(EarlyStart.Discover(Array.Empty<ModFolder>()) == StartupTiming.Normal, "no mod folders means no early start");
     }
 
     private static void RequiredItemChecks()

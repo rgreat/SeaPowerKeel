@@ -374,9 +374,10 @@ internal sealed partial class KeelHost : MonoBehaviour
             log.LogWarning($"Could not read the mod list from usersettings.ini early: {ex.Message}");
             return null;
         }
-        if (!disk.Any(f => f.Enabled && EarlyStart.FolderAsks(f.Path)))
+        var timing = EarlyStart.Discover(disk);
+        blocking = timing == StartupTiming.Blocking;
+        if (timing == StartupTiming.Normal)
             return null;
-        blocking = disk.Any(f => f.Enabled && EarlyStart.FolderBlocks(f.Path));
         log.LogInfo("A mod asked to start early: Keel takes the mod list from usersettings.ini now instead of waiting for the game's.");
         return disk;
     }

@@ -16,7 +16,7 @@ internal static class Scanner
 
     // Never plugins of their own: Keel itself and Anchor Chain's two loader DLLs (which Keel only uses as a library).
     // Only these exact names: a mod called AnchorChainSomething.dll is a mod.
-    private static string ExcludedReason(string file)
+    internal static string ExcludedReason(string file)
     {
         string name = Path.GetFileName(file);
         if (name.StartsWith("SeaPowerKeel", StringComparison.OrdinalIgnoreCase))
@@ -41,7 +41,7 @@ internal static class Scanner
         foreach (ModFolder folder in folders)
         {
             Manifest manifest = Manifest.Read(folder.Path, warn);
-            bool folderEarly = EarlyStart.FolderAsks(folder.Path), folderBlocking = EarlyStart.FolderBlocks(folder.Path);
+            var folderTiming = EarlyStart.FolderTiming(folder.Path);
             List<RequiredItem> required = RequiredItems.OfFolder(folder.Path);
             List<string> dlls;
             try
@@ -82,8 +82,8 @@ internal static class Scanner
                 foreach (PluginEntry p in found)
                 {
                     p.Order = order++;
-                    p.StartEarly |= folderEarly || folderBlocking;
-                    p.BlockingStart |= folderBlocking;
+                    p.StartEarly |= folderTiming != StartupTiming.Normal;
+                    p.BlockingStart |= folderTiming == StartupTiming.Blocking;
                     p.RequiredItems.AddRange(required);
                     if (offBuild != null && p.State == PluginState.Pending)
                         p.Stop(PluginState.Skipped, $"{offBuild} build: this game has the {GameState.BuildName} (keel.ini)");
@@ -101,7 +101,7 @@ internal static class Scanner
         {
             using var stream = new MemoryStream(File.ReadAllBytes(dll));
             using ModuleDefinition module = ModuleDefinition.ReadModule(stream, new ReaderParameters { ReadSymbols = false, AssemblyResolver = resolver });
-            bool dllBlocking = EarlyStart.AssemblyBlocks(module.Assembly), dllEarly = dllBlocking || EarlyStart.AssemblyAsks(module.Assembly);
+            var dllTiming = EarlyStart.AssemblyTiming(module.Assembly);
             foreach (TypeDefinition type in module.GetTypes())
             {
                 if (!type.IsClass || type.IsAbstract || !type.HasCustomAttributes)
@@ -135,8 +135,8 @@ internal static class Scanner
                 entry.AssemblyName = module.Assembly.Name.Name;
                 entry.TypeName = type.FullName.Replace('/', '+');
                 entry.Folder = folder;
-                entry.StartEarly = dllEarly;
-                entry.BlockingStart = dllBlocking;
+                entry.StartEarly = dllTiming != StartupTiming.Normal;
+                entry.BlockingStart = dllTiming == StartupTiming.Blocking;
                 result.Add(entry);
             }
         }

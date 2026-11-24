@@ -6,6 +6,8 @@ using Mono.Cecil;
 
 namespace SeaPowerKeel;
 
+internal enum StartupTiming { Normal, Early, Blocking }
+
 /// <summary>
 /// Opt-in "start early" (asked for by rgreat, author of the Alternative mods, 2026-11-12). On the 3D globe build Keel starts mods
 /// only after the game's start-up load screen is done, because mods started during it can keep the unit data from loading (and
@@ -43,30 +45,72 @@ internal static class EarlyStart
         return false;
     }
 
-    /// <summary>True when the folder's _info.ini asks for an early start (false when there is none or it cannot be read).</summary>
-    public static bool FolderAsks(string folder) => FolderHas(folder, InfoKey) || FolderBlocks(folder);
-
-    /// <summary>True when the folder's _info.ini asks for a blocking start: before the game's first frame, holding the game up.</summary>
-    public static bool FolderBlocks(string folder) => FolderHas(folder, BlockingInfoKey);
-
-    private static bool FolderHas(string folder, string key)
+    public static StartupTiming FolderTiming(string folder)
     {
         try
         {
-            string path = Path.Combine(folder ?? "", "_info.ini");
-            return File.Exists(path) && InInfoIni(File.ReadAllText(path), key);
+            string path = Path.Combine(folder, "_info.ini");
+            if (File.Exists(path))
+            {
+                string ini = File.ReadAllText(path);
+                if (InInfoIni(ini, BlockingInfoKey)) return StartupTiming.Blocking;
+                if (InInfoIni(ini, InfoKey)) return StartupTiming.Early;
+            }
         }
-        catch (Exception)
-        {
-            return false;
-        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return StartupTiming.Normal;
     }
 
-    /// <summary>True when the assembly carries AssemblyMetadata("Keel.StartEarly", "true").</summary>
-    public static bool AssemblyAsks(AssemblyDefinition assembly) => AssemblyHas(assembly, MetadataKey);
+    public static StartupTiming AssemblyTiming(AssemblyDefinition assembly)
+    {
+        if (AssemblyHas(assembly, BlockingMetadataKey)) return StartupTiming.Blocking;
+        return AssemblyHas(assembly, MetadataKey) ? StartupTiming.Early : StartupTiming.Normal;
+    }
 
-    /// <summary>True when the assembly carries AssemblyMetadata("Keel.BlockingStart", "true").</summary>
-    public static bool AssemblyBlocks(AssemblyDefinition assembly) => AssemblyHas(assembly, BlockingMetadataKey);
+    // The first-screen hook needs this answer before Unity resumes. Only file and Cecil reads run in parallel.
+    public static StartupTiming Discover(IList<ModFolder> folders)
+    {
+        string[] enabled = folders.Where(f => f.Enabled).Select(f => f.Path).ToArray();
+        var iniTiming = StartupTiming.Normal;
+        foreach (string path in enabled)
+        {
+            var timing = FolderTiming(path);
+            if (timing == StartupTiming.Blocking) return timing;
+            if (timing == StartupTiming.Early) iniTiming = timing;
+        }
+        if (enabled.Length == 0) return iniTiming;
+
+        var dllTiming = enabled.AsParallel().WithDegreeOfParallelism(Math.Min(4, Environment.ProcessorCount))
+                               .Select(ScanFolder).Max();
+        return dllTiming > iniTiming ? dllTiming : iniTiming;
+    }
+
+    private static StartupTiming ScanFolder(string path)
+    {
+        var timing = StartupTiming.Normal;
+        try
+        {
+            foreach (string dll in Directory.EnumerateFiles(path, "*.dll", SearchOption.AllDirectories))
+            {
+                if (Scanner.ExcludedReason(dll) != null) continue;
+                try
+                {
+                    using var module = ModuleDefinition.ReadModule(dll);
+                    var request = AssemblyTiming(module.Assembly);
+                    if (request == StartupTiming.Blocking) return request;
+                    if (request == StartupTiming.Early) timing = request;
+                }
+                catch (Exception)
+                {
+                    // Native and malformed DLLs cannot supply a timing hint. Scanner diagnoses them on its normal pass.
+                }
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return timing;
+    }
 
     private static bool AssemblyHas(AssemblyDefinition assembly, string key) =>
         assembly?.CustomAttributes.Any(a => a.AttributeType.FullName == "System.Reflection.AssemblyMetadataAttribute"
